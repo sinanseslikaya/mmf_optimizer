@@ -1,322 +1,218 @@
 import argparse
 import requests
-import us
+import json
+import os
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import List, Optional, Dict, Any, Tuple
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.prompt import Prompt, FloatPrompt, Confirm
+from rich import box
 
-fifty_percent_states = ["CA", "NY", "CT"]
+# Local imports
+from tax_data import FEDERAL_BRACKETS, STATE_TAX_DATA
+from logic import get_marginal_rate, process_fund, filter_funds
+
+CONFIG_PATH = os.path.expanduser("~/.mmf_optimizer_config.json")
+console = Console()
 
 
-def get_fund_data():
-    """
-    Retrieves fund data from a specified URL.
+@dataclass
+class Config:
+    federal_tax_rate: Optional[float] = None
+    state_tax_rate: Optional[float] = None
+    state: Optional[str] = None
+    last_updated: str = ""
 
-    Returns:
-        dict: A dictionary containing the fund data in JSON format.
-            Returns None if the data retrieval fails.
-    """
-    url = "https://moneymarket.fun/data/fundYields.json"
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print("Failed to retrieve data from the server.")
+    def is_valid(self):
+        if not self.last_updated:
+            return False
+        try:
+            updated_dt = datetime.fromisoformat(self.last_updated)
+            return datetime.now() - updated_dt < timedelta(days=30)
+        except (ValueError, TypeError):
+            return False
+
+    @classmethod
+    def load(cls):
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r") as f:
+                    data = json.load(f)
+                    return cls(**data)
+            except (json.JSONDecodeError, TypeError, IOError):
+                pass
+        return cls()
+
+    def save(self):
+        data = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+        data["last_updated"] = datetime.now().isoformat()
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(data, f)
+
+
+def get_fund_data(
+    url: str = "https://moneymarket.fun/data/fundYields.json",
+) -> Optional[List[Dict[str, Any]]]:
+    """Retrieves fund data from a specified URL."""
+    try:
+        with console.status("[bold green]Fetching fund data..."):
+            response = requests.get(url)
+            response.raise_for_status()
+            return response.json()
+    except requests.RequestException as e:
+        console.print(f"[bold red]Error:[/bold red] Failed to retrieve data: {e}")
         return None
 
 
-def find_state_in_fund_name(fund, state):
-    """
-    Checks if a given state is present in the name of a fund.
-
-    Args:
-        fund (dict): A dictionary representing a fund.
-        state (str): The state to search for in the fund name.
-
-    Returns:
-        bool: True if the state is found in the fund name, False otherwise.
-    """
-    if state in ["GEN", "NONE"]:
-        return False
-
-    if state == "DC":
-        return True
-
-    state_full_name = us.states.lookup(state).name
-    return state_full_name.lower() in fund["name"].lower()
-
-
-def calculate_after_tax_yield(
-    fund_yield, federal_tax_rate, state_tax_rate, Ps, Pm, Pg, Pt
-):
-    """
-    Calculate the after-tax yield of a fund.
-
-    Args:
-        fund_yield (float): The yield of the fund before taxes.
-        federal_tax_rate (float): The federal tax rate as a decimal.
-        state_tax_rate (float): The state tax rate as a decimal.
-        Ps (float): The proportion of the yield subject to state tax.
-        Pm (float): The proportion of the yield subject to municipal tax.
-        Pg (float): The proportion of the yield subject to federal tax.
-        Pt (float): The proportion of the yield subject to both federal and state tax.
-
-    Returns:
-        float: The after-tax yield of the fund.
-
-    """
-    after_tax_yield = (
-        fund_yield * Ps
-        + fund_yield * Pm * (1 - state_tax_rate)
-        + fund_yield * Pg * (1 - federal_tax_rate)
-        + fund_yield * Pt * (1 - federal_tax_rate - state_tax_rate)
+def display_top_funds(funds: List[Dict[str, Any]], investment_amount: float):
+    table = Table(
+        title="[bold blue]Top 5 Money Market Funds[/bold blue]",
+        box=box.ROUNDED,
+        header_style="bold magenta",
+        show_lines=True,
     )
-    return after_tax_yield
+    table.add_column("Rank", justify="center")
+    table.add_column("Ticker", style="cyan")
+    table.add_column("Name", style="white")
+    table.add_column("After-Tax Yield", justify="right")
+    table.add_column("Tax-Equiv Yield", justify="right")
+    table.add_column("Annual Dist", justify="right", style="green")
+
+    for i, fund in enumerate(funds[:5], start=1):
+        table.add_row(
+            str(i),
+            fund["ticker"],
+            fund["name"],
+            f"{fund['after_tax_yield']:.2f}%",
+            f"{fund['tax_equivalent_yield']:.2f}%",
+            f"${investment_amount * fund['after_tax_yield'] / 100:,.2f}",
+        )
+    console.print(table)
 
 
-def calculate_tax_equivalent_yield(
-    fund_yield, federal_tax_rate, state_tax_rate, Ps, Pm, Pg, Pt
-):
-    """
-    Calculates the tax equivalent yield based on the given parameters.
-
-    Args:
-        fund_yield (float): The yield of the fund.
-        federal_tax_rate (float): The federal tax rate.
-        state_tax_rate (float): The state tax rate.
-        Ps (float): The proportion of the yield subject to state tax.
-        Pm (float): The proportion of the yield subject to municipal tax.
-        Pg (float): The proportion of the yield subject to federal tax.
-        Pt (float): The proportion of the yield subject to other taxes.
-
-    Returns:
-        float: The tax equivalent yield.
-
-    """
-    tax_equivalent_yield = (
-        fund_yield * Ps / (1 - federal_tax_rate - state_tax_rate)
-        + fund_yield
-        * Pm
-        * (1 - state_tax_rate)
-        / (1 - federal_tax_rate - state_tax_rate)
-        + fund_yield
-        * Pg
-        * (1 - federal_tax_rate)
-        / (1 - federal_tax_rate - state_tax_rate)
-        + fund_yield * Pt
+def get_tax_info(args: argparse.Namespace, config: Config) -> Tuple[float, float, str]:
+    state = (
+        args.state
+        or config.state
+        or Prompt.ask(
+            "Enter your [bold]State Abbreviation[/bold] (e.g., NY, CA, WA)"
+        ).upper()
     )
-    return tax_equivalent_yield
 
+    if args.federal_tax_rate is not None and args.state_tax_rate is not None:
+        return args.federal_tax_rate / 100, args.state_tax_rate / 100, state
 
-def calculate_Ps(fund, state):
-    """
-    Calculate the value of Ps based on the given fund and state.
+    if config.is_valid() and not any([args.federal_tax_rate, args.state_tax_rate]):
+        last_upd = datetime.fromisoformat(config.last_updated).strftime("%Y-%m-%d")
+        if Confirm.ask(f"Reuse saved settings from {last_upd}?"):
+            return config.federal_tax_rate, config.state_tax_rate, state
 
-    Args:
-        fund (dict): A dictionary representing the fund.
-        state (str): The state for which Ps needs to be calculated.
-
-    Returns:
-        float: The calculated value of Ps.
-
-    """
-    Ps = 0
-    in_state_muni = find_state_in_fund_name(fund, state)
-
-    muni_percent = 0
-
-    if fund["category"] in ["OtherTaxExempt", "SingleState"]:
-        muni_percent = sum(
-            value
-            for value in [
-                fund.get("variableRateDemandNote", 0),
-                fund.get("otherMunicipalSecurity", 0),
-                fund.get("tenderOptionBond", 0),
-                fund.get("investmentCompany", 0),
-                fund.get("nonFinancialCompanyCommercialPaper", 0),
-            ]
-            if value is not None
+    if Confirm.ask("Would you like to estimate tax rates based on income?"):
+        income = FloatPrompt.ask("Enter your [bold]Annual Taxable Income[/bold] ($)")
+        filing_status = Prompt.ask(
+            "Filing Status", choices=["single", "married"], default="single"
         )
 
-    # all states besides NJ
-    if in_state_muni and state.lower() != "nj":
-        Ps = muni_percent
-    # NJ has a 80% rule for muni
-    elif in_state_muni and muni_percent >= 0.8:
-        Ps = muni_percent
+        fed_rate = get_marginal_rate(income, FEDERAL_BRACKETS[filing_status])
+        state_brackets = STATE_TAX_DATA.get(state, [(0, 0.05)])
+        state_rate = get_marginal_rate(income, state_brackets)
 
-    return Ps
-
-
-def calculate_Pm(fund, state):
-    """
-    Calculate the value of Pm based on the given fund and state.
-
-    Parameters:
-    - fund (dict): A dictionary representing the fund.
-    - state (str): The state for which Pm needs to be calculated.
-
-    Returns:
-    - Pm (float): The calculated value of Pm.
-
-    """
-    Pm = 0
-    in_state_muni = find_state_in_fund_name(fund, state)
-
-    muni_percent = 0
-
-    if fund["category"] in ["OtherTaxExempt", "SingleState"]:
-        muni_percent = sum(
-            value
-            for value in [
-                fund.get("variableRateDemandNote", 0),
-                fund.get("otherMunicipalSecurity", 0),
-                fund.get("tenderOptionBond", 0),
-                fund.get("investmentCompany", 0),
-                fund.get("nonFinancialCompanyCommercialPaper", 0),
-            ]
-            if value is not None
+        console.print(
+            f"Estimated Rates: Federal [bold]{fed_rate * 100:.1f}%[/bold], State [bold]{state_rate * 100:.1f}%[/bold]"
         )
+        if not Confirm.ask("Use these rates?"):
+            fed_rate = FloatPrompt.ask("Enter Federal Tax Rate (%)") / 100
+            state_rate = FloatPrompt.ask("Enter State Tax Rate (%)") / 100
+    else:
+        fed_rate = (
+            args.federal_tax_rate or FloatPrompt.ask("Enter Federal Tax Rate (%)")
+        ) / 100
+        state_rate = (
+            args.state_tax_rate or FloatPrompt.ask("Enter State Tax Rate (%)")
+        ) / 100
 
-    if not in_state_muni:
-        Pm = muni_percent
-
-    return Pm
-
-
-def calculate_Pg(fund, state):
-    """
-    Calculate the value of Pg (Percent of US Government) based on the given fund and state.
-
-    Parameters:
-    - fund (dict): A dictionary representing the fund, containing information about different debt sources.
-    - state (str): The state for which the Pg value is being calculated.
-
-    Returns:
-    - Pg (float): The calculated value of Pg.
-
-    """
-    Pg = 0
-    # Summarize All sources of USGO into one value for tax calculations.
-    usgo_percent = sum(
-        value
-        for value in [
-            fund.get("usTreasuryDebt", 0),
-            fund.get("usGovernmentAgencyDebt", 0),
-        ]
-        if value is not None
-    )
-    # If this is a state with a 50% threshold, then only put the value in if the USGO is greater than .5
-
-    if state in fifty_percent_states and usgo_percent >= 0.5:
-        Pg = usgo_percent
-    elif state not in fifty_percent_states:
-        Pg = usgo_percent
-
-    return Pg
+    return fed_rate, state_rate, state
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Calculate top 5 money market funds based on after-tax yield"
-    )
-    parser.add_argument(
-        "--federal_tax_rate",
-        type=float,
-        help="Marginal federal tax rate",
-        required=True,
-    )
-    parser.add_argument(
-        "--state_tax_rate", type=float, help="Marginal state tax rate", required=True
-    )
-    parser.add_argument("--state", type=str, help="State name")
-    parser.add_argument("--investment_amount", type=float, help="Investment amount")
-    parser.add_argument("--bank_apy", type=float, help="Current bank APY")
-    parser.add_argument("--issuer", type=str, help="Issuer name", required=False)
-    parser.add_argument(
-        "--institutional", type=bool, help="include institutional funds", required=False
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--federal_tax_rate", type=float)
+    parser.add_argument("--state_tax_rate", type=float)
+    parser.add_argument("--state", type=str)
+    parser.add_argument("--investment_amount", type=float)
+    parser.add_argument("--bank_apy", type=float)
+    parser.add_argument("--issuer", type=str)
     args = parser.parse_args()
 
-    # if not all(vars(args).values()):
-    #     parser.error("All arguments are required.")
+    console.clear()
+    config = Config.load()
+    fed_rate, state_rate, state = get_tax_info(args, config)
+    inv_amt = args.investment_amount or FloatPrompt.ask("Enter Investment Amount ($)")
+
+    bank_apy = args.bank_apy
+    if bank_apy is None:
+        bank_apy_input = Prompt.ask(
+            "Enter [bold]Bank APY[/bold] (%) to compare against (optional)", default=""
+        )
+        if bank_apy_input:
+            try:
+                bank_apy = float(bank_apy_input)
+            except ValueError:
+                console.print(
+                    "[yellow]Invalid input for APY, skipping comparison.[/yellow]"
+                )
+
+    issuer = args.issuer
+    if issuer is None:
+        issuer_input = Prompt.ask(
+            "Enter [bold]Issuer Name[/bold] to filter by (optional)", default=""
+        )
+        issuer = issuer_input if issuer_input.strip() else None
+
+    # Update and save config
+    config.federal_tax_rate = fed_rate
+    config.state_tax_rate = state_rate
+    config.state = state
+    config.save()
+
+    console.print(
+        Panel(
+            f"Federal Tax: [bold]{fed_rate * 100:.1f}%[/bold] | State Tax: [bold]{state_rate * 100:.1f}%[/bold] ({state})\nInvestment: [bold]${inv_amt:,.2f}[/bold]",
+            title="[bold]Optimizer Configuration[/bold]",
+            box=box.ROUNDED,
+        )
+    )
 
     fund_data = get_fund_data()
-    if fund_data:
-        top_funds = []
-        for fund in fund_data:
+    if not fund_data:
+        return
 
-            # these should all be skip conditions
-            if fund["minimumInitialInvestment"] > args.investment_amount:
-                continue
+    processed = sorted(
+        [
+            process_fund(f, state, fed_rate, state_rate)
+            for f in fund_data
+            if filter_funds(f, inv_amt, issuer)
+        ],
+        key=lambda x: x["tax_equivalent_yield"],
+        reverse=True,
+    )
+    if not processed:
+        console.print("[yellow]No funds found.[/yellow]")
+        return
+    display_top_funds(processed, inv_amt)
 
-            if args.issuer and args.issuer.lower() not in fund["name"].lower():
-                continue
-
-            # if not args.institutional and fund["investorType"] == "Institutional":
-            #     continue  
-            # not including this currently 
-
-            # end of skip conditions
-
-            # calculate the proportion of the yield subject to each tax
-            Ps = calculate_Ps(fund, args.state)
-            Pm = calculate_Pm(fund, args.state)
-            Pg = calculate_Pg(fund, args.state)
-            Pt = 1 - (Ps + Pm + Pg)
-
-            # if fund["ticker"] in ["SWPXX", "SNSXX", "SNOXX", "SNVXX", "SWVXX"]:
-            #     print(fund["ticker"])
-            #     print(f"Ps: {Ps}")
-            #     print(f"Pm: {Pm}")
-            #     print(f"Pg: {Pg}")
-            #     print(f"Pt: {Pt}")
-
-            after_tax_yield = calculate_after_tax_yield(
-                fund["yield"],
-                args.federal_tax_rate / 100,
-                args.state_tax_rate / 100,
-                Ps,
-                Pm,
-                Pg,
-                Pt,
+    if bank_apy:
+        bank_yield = bank_apy * (1 - fed_rate)
+        console.print(
+            Panel(
+                f"Bank After-tax Yield: [bold]{bank_yield:.2f}%[/bold]\nAnnual Dist: [bold]${inv_amt * bank_yield / 100:,.2f}[/bold]",
+                title="[bold yellow]Bank Comparison[/bold yellow]",
+                box=box.ROUNDED,
             )
-
-            tax_equivalent_yield = calculate_tax_equivalent_yield(
-                fund["yield"],
-                args.federal_tax_rate / 100,
-                args.state_tax_rate / 100,
-                Ps,
-                Pm,
-                Pg,
-                Pt,
-            )
-
-            fund["after_tax_yield"] = after_tax_yield
-            fund["tax_equivalent_yield"] = tax_equivalent_yield
-            top_funds.append(fund)
-
-        top_funds.sort(key=lambda x: x["tax_equivalent_yield"], reverse=True)
-        print("Top 5 Money Market Funds based on tax_equivalent_yield:")
-        for i, fund in enumerate(top_funds[:5], start=1):
-            print(f"Rank: {i}")
-            print(f"Ticker: {fund['ticker']}")
-            print(f"Name: {fund['name']}")
-            print(f"After-tax Yield: {fund['after_tax_yield']:.2f}%")
-            print(f"Tax Equivalent Yield: {fund['tax_equivalent_yield']:.2f}%")
-            print(
-                f"After Tax Distributions on ${args.investment_amount:,.2f} over 12 months: ${args.investment_amount * fund['after_tax_yield'] / 100:,.2f}"
-            )
-            print("--------------")
-
-        # make same calculations on user bank apy if it was provided
-        if args.bank_apy:
-            bank_after_tax_yield = args.bank_apy * (1 - args.federal_tax_rate / 100)
-            bank_after_tax_distributions = (
-                args.investment_amount * bank_after_tax_yield / 100
-            )
-            print(f"Bank After-tax Yield: {bank_after_tax_yield:.2f}%")
-            print(
-                f"Bank After Tax Distributions on ${args.investment_amount:,.2f} over 12 months: ${bank_after_tax_distributions:,.2f}"
-            )
-            print("--------------")
+        )
 
 
 if __name__ == "__main__":
