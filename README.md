@@ -63,7 +63,7 @@ python3 optimizer.py --federal_tax_rate 24 --state_tax_rate 5 --state NY --inves
 
 - `optimizer.py`: The entry point. Handles the TUI, user input, and orchestration.
 - `logic.py`: Core business logic, yield formulas, and fund processing.
-- `tax_data.py`: 2025/2026 Federal and 50-state marginal tax brackets.
+- `tax_data.py`: 2026 Federal and 50-state marginal tax brackets.
 - `tests/`: A comprehensive test suite verifying calculation accuracy and edge cases.
 
 ## Testing
@@ -74,4 +74,4 @@ python3 -m pytest tests/test_optimizer.py
 ```
 
 ## Disclaimer
-*This tool provides estimates based on 2025 tax law data. It is not financial or tax advice. Always consult with a certified tax professional regarding your specific tax situation.*
+*This tool provides estimates based on 2026 tax data. It is not financial or tax advice. Always consult with a certified tax professional regarding your specific tax situation.*
