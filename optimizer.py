@@ -27,7 +27,11 @@ class Config:
     last_updated: str = ""
 
     def is_valid(self):
-        if not self.last_updated:
+        if (
+            not self.last_updated
+            or self.federal_tax_rate is None
+            or self.state_tax_rate is None
+        ):
             return False
         try:
             updated_dt = datetime.fromisoformat(self.last_updated)
@@ -105,7 +109,12 @@ def get_tax_info(args: argparse.Namespace, config: Config) -> Tuple[float, float
     if args.federal_tax_rate is not None and args.state_tax_rate is not None:
         return args.federal_tax_rate / 100, args.state_tax_rate / 100, state
 
-    if config.is_valid() and not any([args.federal_tax_rate, args.state_tax_rate]):
+    if (
+        config.is_valid()
+        and config.federal_tax_rate is not None
+        and config.state_tax_rate is not None
+        and not any([args.federal_tax_rate, args.state_tax_rate])
+    ):
         last_upd = datetime.fromisoformat(config.last_updated).strftime("%Y-%m-%d")
         if Confirm.ask(f"Reuse saved settings from {last_upd}?"):
             return config.federal_tax_rate, config.state_tax_rate, state

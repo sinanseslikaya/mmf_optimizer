@@ -1,5 +1,0 @@
-requests
-us
-pytest
-pytest-mock
-rich

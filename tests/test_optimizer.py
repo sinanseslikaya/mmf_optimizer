@@ -3,9 +3,9 @@ from logic import (
     find_state_in_fund_name,
     calculate_after_tax_yield,
     calculate_tax_equivalent_yield,
-    calculate_Ps,
-    calculate_Pm,
-    calculate_Pg,
+    calculate_ps,
+    calculate_pm,
+    calculate_pg,
 )
 
 
@@ -42,7 +42,7 @@ def test_calculate_tax_equivalent_yield():
     assert res == pytest.approx(5.0)
 
 
-def test_calculate_Ps():
+def test_calculate_ps():
     fund = {
         "category": "SingleState",
         "name": "Vanguard New York Municipal Money Market Fund",
@@ -52,26 +52,26 @@ def test_calculate_Ps():
         "investmentCompany": 0.05,
         "nonFinancialCompanyCommercialPaper": 0.05,
     }
-    assert calculate_Ps(fund, "NY") == pytest.approx(1.0)
-    assert calculate_Ps(fund, "CA") == 0
+    assert calculate_ps(fund, "NY") == pytest.approx(1.0)
+    assert calculate_ps(fund, "CA") == 0
 
 
-def test_calculate_Pm():
+def test_calculate_pm():
     fund = {
         "category": "OtherTaxExempt",
         "name": "General Muni Fund",
         "variableRateDemandNote": 0.9,
     }
-    assert calculate_Pm(fund, "NY") == 0.9
+    assert calculate_pm(fund, "NY") == 0.9
 
 
-def test_calculate_Pg():
+def test_calculate_pg():
     fund = {"usTreasuryDebt": 0.4, "usGovernmentAgencyDebt": 0.2}
-    assert calculate_Pg(fund, "WA") == pytest.approx(0.6)
-    assert calculate_Pg(fund, "CA") == pytest.approx(0.6)
+    assert calculate_pg(fund, "WA") == pytest.approx(0.6)
+    assert calculate_pg(fund, "CA") == pytest.approx(0.6)
 
     fund_low = {"usTreasuryDebt": 0.3, "usGovernmentAgencyDebt": 0.1}
-    assert calculate_Pg(fund_low, "CA") == 0
+    assert calculate_pg(fund_low, "CA") == 0
 
 
 def test_main_top_5(mocker, capsys):
